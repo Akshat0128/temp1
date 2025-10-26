@@ -347,14 +347,21 @@ class StrategyExecutor(QThread):
             self.update_diff_signal.emit(strat.get("Strategy Name", ""), 0.0)
             return
 
-        # Calculate ratio (for strategies with different lot sizes)
-        lots_list = [abs(lots) for (side, lots, price, lot_size, token) in legs if abs(lots) > 0]
-        ratio = reduce(gcd, lots_list) if lots_list else 1
+        # --- MODIFICATION START ---
+        # --- New Difference Calculation Logic based on user request ---
+        # Formula: (total amount buy - total amount sell) / (total shares buyed (accross all leg))
+        
+        total_buy_value = sum(abs(lots) * lot_size * price for (side, lots, price, lot_size, _) in legs if side == "BUY")
+        total_sell_value = sum(abs(lots) * lot_size * price for (side, lots, price, lot_size, _) in legs if side == "SELL")
 
-        # Calculate net difference
-        total_buy = sum((lots // ratio) * price for (side, lots, price, _, _) in legs if side == "BUY")
-        total_sell = sum((lots // ratio) * price for (side, lots, price, _, _) in legs if side == "SELL")
-        net = total_buy - total_sell
+        # Denominator is the total quantity of *all BUY legs*
+        total_buy_quantity = sum(abs(lots) * lot_size for (side, lots, _, lot_size, _) in legs if side == "BUY")
+
+        net = 0.0
+        if total_buy_quantity > 0:
+            net = (total_buy_value - total_sell_value) / total_buy_quantity
+        # --- MODIFICATION END ---
+
 
         # Always emit diff for GUI, even if disabled
         self.update_diff_signal.emit(strat.get("Strategy Name", ""), net)
