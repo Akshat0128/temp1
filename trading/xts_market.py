@@ -20,7 +20,6 @@ def subscribe_one_token_per_exchange(df):
             except Exception as e:
                 print(f"❌ Error subscribing broker's Feed")
 
-
 def get_ltp(symbol):
     exchange = get_exchange_from_scripmaster(symbol)
 

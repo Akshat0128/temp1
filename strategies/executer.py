@@ -27,7 +27,6 @@ def calculate_locked_leg1_price(
         price += sign * (current_other_prices[i-1] - initial_other_prices[i-1]) * (abs(r)/abs(r1))
     return price
 
-
 class OrderLegWorker(threading.Thread):
     def __init__(self, strat, state, idx, user_id, on_update, on_finish):
         super().__init__()
