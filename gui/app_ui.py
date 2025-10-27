@@ -464,31 +464,78 @@ class AddStrategyDialog(QDialog):
         return f"{underlying} {expiry} {opt_type} {strike}".strip().upper()
 
     def accept(self):
-        self.validate_all()
-        if not self.ok_btn.isEnabled():
-            return
-        def make_token(underlying, expiry, opt_type, strike):
-            return f"{underlying} {expiry} {opt_type} {strike}".strip().upper()
-        for idx, (_, ucb, ecb, strike_cb, tcb, scb, lots_spin, price_lbl, lot_lbl, total_qty_lbl) in enumerate(self.leg_widgets, start=1):
-            token = make_token(ucb.currentText(), ecb.currentText(), tcb.currentText(), strike_cb.currentText())
-            row = self.scrip_df[self.scrip_df["scripname"].str.upper() == token]
-
-            if row.empty:
-                QMessageBox.warning(self, "Order Size Error", f"Leg {idx}: {token} not found in scripmaster.")
-                return
-            maxqty = int(row['maxqtyperorder'].values[0])
-            lot_size = int(row['marketlot'].values[0])
-            entered_lots = lots_spin.value()
-            entered_qty = entered_lots * lot_size
-            if entered_qty > maxqty:
-                QMessageBox.warning(
-                    self,
-                    "Order Size Error",
-                    f"Leg {idx}: Entered quantity ({entered_qty}) exceeds max allowed per order ({maxqty}) for {token}."
-                )
+            self.validate_all()
+            if not self.ok_btn.isEnabled():
                 return
 
-        super().accept()
+            # --- START: NEW WARNING LOGIC ---
+            try:
+                # 1. Get user's threshold
+                entered_threshold = float(self.diff_edit.text().strip())
+
+                # 2. Get current live diff (re-using logic from update_live_diff)
+                legs = []
+                prices = []
+                lot_sizes = []
+                
+                for (_, ucb, ecb, strike_cb, tcb, scb, lots_spin, *_ ) in self.leg_widgets:
+                    legs.append({'side': scb.currentText(), 'lots': lots_spin.value()})
+                    token_str = f"{ucb.currentText()} {ecb.currentText()} {tcb.currentText()} {strike_cb.currentText()}"
+                    ltp = get_ltp(token_str)
+                    prices.append(ltp if ltp else None)
+                    lot = get_lot_size(token_str)
+                    lot_sizes.append(int(lot) if lot else None)
+
+                # Calculate diff using the executor's logic
+                # Note: This helper function might return (diff, ratio) or just diff.
+                # We adapt to handle both.
+                diff_result = calculate_per_ratio_diff(legs, prices, lot_sizes)
+                
+                live_diff = None
+                if isinstance(diff_result, (tuple, list)):
+                    live_diff = diff_result[0] # Get the first element if it's a tuple/list
+                elif isinstance(diff_result, (int, float)):
+                    live_diff = diff_result # Use it directly if it's a number
+                
+                # 3. Compare and show warning
+                # Check live_diff is not None (in case of error) and the user's condition
+                if live_diff is not None and entered_threshold < live_diff:
+                    reply = QMessageBox.question(self, "Confirmation",
+                                                f"Warning: The threshold ({entered_threshold:.2f}) is less than the current difference ({live_diff:.2f}).\n"
+                                                "This may trigger an immediate trade.\n\nDo you want to continue?",
+                                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) # Default to 'No'
+
+                    if reply == QMessageBox.No:
+                        return # Abort accept(), user stays in dialog to edit
+
+            except Exception as e:
+                # If anything fails (e.g., getting live diff), just log it and proceed without the check
+                print(f"Could not perform pre-trade warning check: {e}")
+            # --- END: NEW WARNING LOGIC ---
+
+            def make_token(underlying, expiry, opt_type, strike):
+                return f"{underlying} {expiry} {opt_type} {strike}".strip().upper()
+            for idx, (_, ucb, ecb, strike_cb, tcb, scb, lots_spin, price_lbl, lot_lbl, total_qty_lbl) in enumerate(self.leg_widgets, start=1):
+                token = make_token(ucb.currentText(), ecb.currentText(), tcb.currentText(), strike_cb.currentText())
+                row = self.scrip_df[self.scrip_df["scripname"].str.upper() == token]
+
+                if row.empty:
+                    QMessageBox.warning(self, "Order Size Error", f"Leg {idx}: {token} not found in scripmaster.")
+                    return
+                maxqty = int(row['maxqtyperorder'].values[0])
+                lot_size = int(row['marketlot'].values[0])
+                entered_lots = lots_spin.value()
+                entered_qty = entered_lots * lot_size
+                if entered_qty > maxqty:
+                    QMessageBox.warning(
+                        self,
+                        "Order Size Error",
+                        f"Leg {idx}: Entered quantity ({entered_qty}) exceeds max allowed per order ({maxqty}) for {token}."
+                    )
+                    return
+
+            super().accept()
+            
     def closeEvent(self, event):
         self.live_update_timer.stop()
         super().closeEvent(event)

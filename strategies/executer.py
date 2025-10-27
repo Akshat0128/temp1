@@ -376,7 +376,7 @@ class StrategyExecutor(QThread):
         threshold = float(strat.get("Diff Threshold") or 0)
 
         if status == "waiting":
-            if math.isclose(net, threshold, abs_tol=0.0001):
+            if net>=threshold:
 
                 state["entry_diff"] = net
                 state["status"] = "triggered"
