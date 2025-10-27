@@ -1,4 +1,3 @@
-
 from math import gcd
 from functools import reduce
 
@@ -12,15 +11,33 @@ def get_simplest_lot_ratio(qty_list):
         return lot_sizes
     return [q // factor for q in lot_sizes]
 
-def calculate_per_ratio_diff(legs, prices):
-    """
-    legs: list of dicts with 'side' and 'lots' keys
-    prices: list of LTPs (floats), same order as legs
-    """
-    qtys = [abs(int(leg['lots'])) for leg in legs]
-    ratio = get_simplest_lot_ratio(qtys)
-    diff = 0
-    for idx, leg in enumerate(legs):
-        sign = 1 if leg['side'].upper() == "BUY" else -1
-        diff += sign * prices[idx] * ratio[idx]
-    return diff, ratio
+def calculate_per_ratio_diff(legs, prices, lot_sizes):
+    if len(legs) != len(prices) or len(legs) != len(lot_sizes):
+        return 0.0 
+
+    total_buy_value = 0.0
+    total_sell_value = 0.0
+    total_buy_quantity = 0
+
+    for i, leg in enumerate(legs):
+        price = prices[i]
+        lot_size = lot_sizes[i]
+        lots = int(leg.get('lots', 0))
+        
+        if price is None or price <= 0 or lot_size is None or lot_size <= 0 or lots <= 0:
+            continue 
+
+        total_quantity = abs(lots) * lot_size
+        value = total_quantity * price
+
+        if leg.get('side', '').upper() == "BUY":
+            total_buy_value += value
+            total_buy_quantity += total_quantity
+        else: # SELL
+            total_sell_value += value
+
+    if total_buy_quantity > 0:
+        net = (total_buy_value - total_sell_value) / total_buy_quantity
+        return net
+    
+    return 0.0

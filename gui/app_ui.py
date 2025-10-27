@@ -435,20 +435,30 @@ class AddStrategyDialog(QDialog):
         save_strategies(self.strategy_list)
 
     def update_live_diff(self):
-        try:
-            legs = [
-                {'side': scb.currentText(), 'lots': lots_spin.value()}
-                for (_, ucb, ecb, strike_cb, tcb, scb, lots_spin, *_ ) in self.leg_widgets
-            ]
-            prices = [
-                get_ltp(f"{ucb.currentText()} {ecb.currentText()} {tcb.currentText()} {strike_cb.currentText()}")
-                for (_, ucb, ecb, strike_cb, tcb, scb, lots_spin, *_ ) in self.leg_widgets
-            ]
-            diff, ratio = calculate_per_ratio_diff(legs, prices)
-            self.live_diff_label.setText(f"Current Diff: {diff:.2f}")
-        except Exception:
-            self.live_diff_label.setText("Current Diff: --")
+            try:
+                legs = []
+                prices = []
+                lot_sizes = []
+                
+                for (_, ucb, ecb, strike_cb, tcb, scb, lots_spin, *_ ) in self.leg_widgets:
+                    # 1. Get leg info
+                    legs.append({'side': scb.currentText(), 'lots': lots_spin.value()})
+                    
+                    # 2. Get price
+                    token_str = f"{ucb.currentText()} {ecb.currentText()} {tcb.currentText()} {strike_cb.currentText()}"
+                    ltp = get_ltp(token_str)
+                    prices.append(ltp if ltp else None)
+                    
+                    # 3. Get lot size
+                    lot = get_lot_size(token_str)
+                    lot_sizes.append(int(lot) if lot else None)
 
+                # Calculate diff using the CORRECT executor logic
+                diff = calculate_per_ratio_diff(legs, prices, lot_sizes)
+                self.live_diff_label.setText(f"Current Diff: {diff:.2f}")
+
+            except Exception:
+                self.live_diff_label.setText("Current Diff: --")
 
     def make_token(underlying, expiry, opt_type, strike):
         return f"{underlying} {expiry} {opt_type} {strike}".strip().upper()

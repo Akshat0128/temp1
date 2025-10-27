@@ -10,6 +10,7 @@ import datetime
 from utils.load_tokken import get_lot_size
 from math import gcd
 from functools import reduce
+import math
  
 def calculate_locked_leg1_price(
     initial_leg1_price,
@@ -282,11 +283,16 @@ class StrategyExecutor(QThread):
             lots_key = f"Lots{i}"
             traded_key = f"traded_qty{i}"
 
-            if strat.get(token_key):
+
+            token_value = strat.get(token_key) # Get the actual token string
+            if token_value: # Check if the token string exists
                 total_qty = int(strat.get(lots_key, 0))
                 traded_qty = int(state.get(traded_key, 0))
                 open_qty = total_qty - traded_qty
-                exchange=get_exchange_from_scripmaster(token_key)
+                
+                # Use the 'token_value' here, not 'token_key'
+                exchange = get_exchange_from_scripmaster(token_value) 
+
                 if open_qty > 0:
                     original_side = strat.get(side_key, "BUY").upper()
                     counter_side = "SELL" if original_side == "BUY" else "BUY"
@@ -370,7 +376,7 @@ class StrategyExecutor(QThread):
         threshold = float(strat.get("Diff Threshold") or 0)
 
         if status == "waiting":
-            if abs(net - threshold) == 0:
+            if math.isclose(net, threshold, abs_tol=0.0001):
 
                 state["entry_diff"] = net
                 state["status"] = "triggered"
@@ -562,19 +568,44 @@ class StrategyExecutor(QThread):
                                 last_leg1_price = new_leg1_price
                             except Exception as e:
                                 log_event(strat["Strategy Name"], "Order Modify Error", str(e))
+
                         filled_now = order_bridge.IB_OrderFilledQty(req_id) or 0
                         partial_filled = filled_now - already_filled
-                        qty1 = int(strat.get("Qty1", 0))
-                        filled_qty_leg1 = partial_filled
+                        
+                        # This is the quantity of LEG 1 that just got filled in this iteration
+                        filled_qty_leg1 = partial_filled 
 
-                        for k in range(2, num_legs + 1):
-                            qty_k = int(strat.get(f"Qty{k}", 0))
-                            hedge_qty = int((qty_k / qty1) * filled_qty_leg1) if qty1 else 0
+                        if filled_qty_leg1 > 0:
+                            qty1 = order_qtys[0] 
+                            if qty1 > 0:
+                                for k in range(1, num_legs):
+                                    qty_k = order_qtys[k]
+                                   
+                                    hedge_qty = int((qty_k / qty1) * filled_qty_leg1) 
+                                    
+                                    if hedge_qty > 0:
+                                        t = threading.Thread(
+                                            target=fire_leg_k,
+                                            args=(
+                                                k,  # Use the 0-based index 'k'
+                                                hedge_qty,
+                                                state,
+                                                strat,
+                                                tokens,
+                                                sides,
+                                                self,
+                                                last_leg1_price,
+                                                state["entry_diff"],
+                                                sides[0].upper()
+                                            )
+                                        )
+                                        t.daemon = True
+                                        t.start()
                             if hedge_qty > 0:
                                 t = threading.Thread(
                                     target=fire_leg_k,
                                     args=(
-                                        k - 1,  # adjust index for tokens/sides list (0-based)
+                                        k - 1,  
                                         hedge_qty,
                                         state,
                                         strat,

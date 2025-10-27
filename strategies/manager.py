@@ -1,5 +1,3 @@
-# Handles starting, stopping, editing strategies on demand
-
 import threading
 import time
 from utils.pyIB_APIS import IB_APIS
@@ -30,13 +28,16 @@ class StrategyManager:
             print(f"✏️ Updated {field} of '{name}' to {new_value}")
 
     def square_off_all(self):
-        for name, strat in self.executor.active_strategies.items():
-            if strat['status'] == 'triggered':
-                self.executor.square_off(strat, strat['data']["Token 1"], strat['data']["Token 2"])
-                strat['status'] = 'squared_off'
-                strat['position'] = 'closed'
-                print(f"🔁 Strategy '{name}' squared off")
-        
+            # 'strat_state' here is the 'state' object from the executor
+            for name, strat_state in self.executor.active_strategies.items(): 
+                if strat_state['status'] == 'triggered':
+                    # Call square_off with just the state object
+                    self.executor.square_off(strat_state) 
+                    
+                    strat_state['status'] = 'squared_off'
+                    strat_state['position'] = 'closed'
+                    print(f"🔁 Strategy '{name}' squared off")
+            
     def start_mtm_monitor(self, user_id, mtm_cap, executor):
         def monitor():
             ib = IB_APIS(source_url="YOUR_BRIDGE_URL")
@@ -56,4 +57,3 @@ class StrategyManager:
                     print(f"[MTM_MONITOR] Error: {e}")
                 time.sleep(1)  # 1 second polling
         threading.Thread(target=monitor, daemon=True).start()
-
