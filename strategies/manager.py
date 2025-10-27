@@ -38,22 +38,3 @@ class StrategyManager:
                     strat_state['position'] = 'closed'
                     print(f"🔁 Strategy '{name}' squared off")
             
-    def start_mtm_monitor(self, user_id, mtm_cap, executor):
-        def monitor():
-            ib = IB_APIS(source_url="YOUR_BRIDGE_URL")
-            while True:
-                try:
-                    mtm = ib.IB_MTM(user_id)
-                    if mtm is not None and float(mtm) < -abs(float(mtm_cap)):
-                        print(f"[MTM_MONITOR] MTM {mtm} < -{mtm_cap}, disabling all strategies.")
-                        executor.global_stop = True
-                        # Disable all strategies, don't square off
-                        for state in executor.active_strategies.values():
-                            if state["status"] != "disabled":
-                                state["status"] = "disabled"
-                                executor.update_status_signal.emit(state["strategy"]["Strategy Name"], "disabled")
-                        break
-                except Exception as e:
-                    print(f"[MTM_MONITOR] Error: {e}")
-                time.sleep(1)  # 1 second polling
-        threading.Thread(target=monitor, daemon=True).start()

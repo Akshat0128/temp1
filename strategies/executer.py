@@ -680,13 +680,6 @@ class StrategyExecutor(QThread):
                     abs_pnl += leg_pnl
             strat['P&L'] = round(abs_pnl, 2)
             self.update_pnl_signal.emit(strat['Strategy Name'], abs_pnl)
-            total_pnl = sum([state['strategy'].get('P&L', 0) for state in self.active_strategies.values()])
-            if self.max_loss_global < float('inf') and total_pnl < -self.max_loss_global:
-                for state in self.active_strategies.values():
-                    if state["status"] != "disabled":
-                        state["status"] = "disabled"
-                        self.update_status_signal.emit(state["strategy"]["Strategy Name"], "disabled")
-                        log_event(state["strategy"]["Strategy Name"], "MAXLOSS_DISABLED", f"Total P&L {total_pnl:.2f} breached Max Loss {self.max_loss_global}")
 
             entry_diff = float(state.get("entry_diff", net))
             sl_raw = strat.get("SL", 0)

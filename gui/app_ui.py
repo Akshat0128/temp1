@@ -694,11 +694,6 @@ class MainWindow(QMainWindow):
         for b in (self.btn_stop, self.btn_stop_all, self.btn_delete):
             b.setStyleSheet("QPushButton:disabled {background-color:#ddd;color:#888}")
 
-        self.max_loss_edit = QLineEdit()
-        self.max_loss_edit.setPlaceholderText("Max Loss (₹, optional)")
-        self.max_loss_edit.setMaximumWidth(140)
-        ctrl_layout.addWidget(QLabel("Max Loss:"))
-        ctrl_layout.addWidget(self.max_loss_edit)
         ctrl_layout.addWidget(self.btn_start)
         ctrl_layout.addWidget(self.btn_stop)
         ctrl_layout.addWidget(self.btn_start_all)
@@ -751,17 +746,11 @@ class MainWindow(QMainWindow):
         self.btn_stop.clicked.connect(lambda: self.manager.disable_strategy(self.get_selected_strategy_name()))
         self.btn_load.clicked.connect(self.load_csv)
         self.btn_save.clicked.connect(self.save_csv)
-        max_loss_val = load_max_loss()
-        if max_loss_val:
-            self.max_loss_edit.setText(str(max_loss_val))
-        self.max_loss_edit.textChanged.connect(lambda txt: save_max_loss(txt.strip() or ""))
 
         self.executor = StrategyExecutor(self.user_id, max_loss_global=self.get_global_max_loss())
-        self.max_loss_edit.textChanged.connect(lambda: setattr(self.executor, "max_loss_global", self.get_global_max_loss()))
 
         self.strategy_list = load_strategies()
-        mtm_cap = 10000
-        self.manager.start_mtm_monitor(self.user_id, mtm_cap, self.executor)
+
         for strat in self.strategy_list:
             self._add_strategy_to_table(strat)
             self.executor.add_strategy(strat)
