@@ -2,7 +2,7 @@ from utils.load_tokken import get_exchange_from_scripmaster
 from utils.pyIB_APIS import IB_APIS
 import random
 
-bridge = IB_APIS("http://127.0.0.1:7070")
+bridge = IB_APIS("http://127.0.0.1:21000")
 def subscribe_one_token_per_exchange(df):
     """
     At startup, subscribe one random NSEFO and one random BSEFO token from scripmaster.
