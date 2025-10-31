@@ -11,6 +11,9 @@ from utils.load_tokken import get_lot_size
 from math import gcd
 from functools import reduce
 import math
+
+# Import the standardized helper function
+from utils.strategy_helpers import calculate_per_ratio_diff
  
 def calculate_locked_leg1_price(
     initial_leg1_price,
@@ -29,7 +32,8 @@ def calculate_locked_leg1_price(
     return price
 
 class OrderLegWorker(threading.Thread):
-    def __init__(self, strat, state, idx, user_id, on_update, on_finish):
+    # FIX: Accept the shared lock
+    def __init__(self, strat, state, idx, user_id, on_update, on_finish, lock):
         super().__init__()
         self.strat = strat
         self.state = state
@@ -39,6 +43,7 @@ class OrderLegWorker(threading.Thread):
         self.on_finish = on_finish
         self._stop = threading.Event()
         self.setDaemon(True)
+        self.lock = lock # FIX: Store the lock
 
     def stop(self):
         self._stop.set()
@@ -59,12 +64,16 @@ class OrderLegWorker(threading.Thread):
         token = strat[f"Token{idx}"]
         side = strat.get(f"Side{idx}", "BUY")
         lots = int(strat.get(f"Lots{idx}", 1))
-        lot_size = state.get(f"order_qty{idx}", 1) // lots if lots > 0 else 1
-        order_qty = lots * lot_size
-        prev_traded = state.get(f"traded_qty{idx}", 0)
+        
+        # FIX: Use lock to safely read from state
+        with self.lock:
+            lot_size = state.get(f"order_qty{idx}", 1) // lots if lots > 0 else 1
+            order_qty = lots * lot_size
+            prev_traded = state.get(f"traded_qty{idx}", 0)
+            prev_entry_total = state.get(f"entry_price_total{idx}", 0.0)
+
         to_trade = order_qty - prev_traded
         fill_accum = 0
-        prev_entry_total = state.get(f"entry_price_total{idx}", 0.0)
         left_to_fill = to_trade
 
         try:
@@ -96,7 +105,11 @@ class OrderLegWorker(threading.Thread):
                     Quantity=left_to_fill,
                     CancelIfNotCompleteInSeconds=1,
                 )
-                state.setdefault("order_request_ids", []).append(req_id)
+                
+                # FIX: Use lock to safely write to state
+                with self.lock:
+                    state.setdefault("order_request_ids", []).append(req_id)
+                
                 if self._wait_with_killcheck(1):
                     return
                 if self._stop.is_set():
@@ -107,14 +120,16 @@ class OrderLegWorker(threading.Thread):
                 if filled_qty is None:
                     filled_qty = 0
 
-                prev_traded = state.get(f"traded_qty{idx}", 0)
-                prev_entry_total = state.get(f"entry_price_total{idx}", 0.0)
-                fill_price = xts_get_ltp(token)
-                new_qty = prev_traded + filled_qty
-                new_entry_total = prev_entry_total + filled_qty * fill_price
-                state[f"traded_qty{idx}"] = new_qty
-                state[f"entry_price_total{idx}"] = new_entry_total
-                state[f"entry_price{idx}"] = new_entry_total / new_qty if new_qty > 0 else 0.0
+                # FIX: Use lock to safely read and write state
+                with self.lock:
+                    prev_traded = state.get(f"traded_qty{idx}", 0)
+                    prev_entry_total = state.get(f"entry_price_total{idx}", 0.0)
+                    fill_price = xts_get_ltp(token) # OK to get LTP, but use lock for state change
+                    new_qty = prev_traded + filled_qty
+                    new_entry_total = prev_entry_total + filled_qty * fill_price
+                    state[f"traded_qty{idx}"] = new_qty
+                    state[f"entry_price_total{idx}"] = new_entry_total
+                    state[f"entry_price{idx}"] = new_entry_total / new_qty if new_qty > 0 else 0.0
 
                 fill_accum += filled_qty
                 left_to_fill -= filled_qty
@@ -142,7 +157,10 @@ class OrderLegWorker(threading.Thread):
                     Quantity=left_to_fill,
                     CancelIfNotCompleteInSeconds=1,
                 )
-                state.setdefault("order_request_ids", []).append(req_id)
+                # FIX: Use lock
+                with self.lock:
+                    state.setdefault("order_request_ids", []).append(req_id)
+                
                 if self._wait_with_killcheck(wait_sec):
                     return
                 if self._stop.is_set():
@@ -153,14 +171,16 @@ class OrderLegWorker(threading.Thread):
                 if filled_qty is None:
                     filled_qty = 0
 
-                prev_traded = state.get(f"traded_qty{idx}", 0)
-                prev_entry_total = state.get(f"entry_price_total{idx}", 0.0)
-                fill_price = px
-                new_qty = prev_traded + filled_qty
-                new_entry_total = prev_entry_total + filled_qty * fill_price
-                state[f"traded_qty{idx}"] = new_qty
-                state[f"entry_price_total{idx}"] = new_entry_total
-                state[f"entry_price{idx}"] = new_entry_total / new_qty if new_qty > 0 else 0.0
+                # FIX: Use lock
+                with self.lock:
+                    prev_traded = state.get(f"traded_qty{idx}", 0)
+                    prev_entry_total = state.get(f"entry_price_total{idx}", 0.0)
+                    fill_price = px
+                    new_qty = prev_traded + filled_qty
+                    new_entry_total = prev_entry_total + filled_qty * fill_price
+                    state[f"traded_qty{idx}"] = new_qty
+                    state[f"entry_price_total{idx}"] = new_entry_total
+                    state[f"entry_price{idx}"] = new_entry_total / new_qty if new_qty > 0 else 0.0
 
                 fill_accum += filled_qty
                 left_to_fill -= filled_qty
@@ -190,10 +210,11 @@ class OrderLegWorker(threading.Thread):
                     Quantity=left_to_fill,
                     CancelIfNotCompleteInSeconds=0,
                 )
-                state.setdefault("order_request_ids", []).append(req_id)
+                # FIX: Use lock
+                with self.lock:
+                    state.setdefault("order_request_ids", []).append(req_id)
                 self.on_update()
         except Exception as e:
-
             log_event(strat["Strategy Name"], "Order Error", str(e))
         self.on_finish(self.idx)
 
@@ -213,54 +234,66 @@ class StrategyExecutor(QThread):
         self.leg_workers_finished = {}
         self.max_loss_global = max_loss_global
         self.global_stop = False
-
+        self.state_lock = threading.Lock() # FIX: Add the lock
 
     def add_strategy(self, strat):
         name = strat.get("Strategy Name")
         if not name:
             return
-        state = {
-            "strategy": strat,
-            "status": "waiting",
-            "last_diff": 0.0,
-            "entry_diff": 0.0,
-        }
-        for i in range(1, 9):
-            lots = int(strat.get(f"Lots{i}", 0))
-            token = strat.get(f"Token{i}", None)
-            if token and lots > 0:
-                lot_size = int(get_lot_size(token) or 1)
-                state[f"order_qty{i}"] = lots * lot_size
-                state.setdefault(f"traded_qty{i}", 0)
-                strat[f"OrderQty{i}"] = state[f"order_qty{i}"]
-                strat[f"TradedQty{i}"] = state[f"traded_qty{i}"]
-                strat[f"TotalQty{i}"] = state[f"order_qty{i}"]   # For display
-            else:
-                state[f"order_qty{i}"] = 0
-                state[f"traded_qty{i}"] = 0
-                strat[f"OrderQty{i}"] = 0
-                strat[f"TradedQty{i}"] = 0
-                strat[f"TotalQty{i}"] = 0
+            
+        # FIX: Use lock to safely modify the shared strategies dict
+        with self.state_lock:
+            state = {
+                "strategy": strat,
+                "status": "waiting",
+                "last_diff": 0.0,
+                "entry_diff": 0.0,
+            }
+            for i in range(1, 9):
+                lots = int(strat.get(f"Lots{i}", 0))
+                token = strat.get(f"Token{i}", None)
+                if token and lots > 0:
+                    lot_size = int(get_lot_size(token) or 1)
+                    state[f"order_qty{i}"] = lots * lot_size
+                    state.setdefault(f"traded_qty{i}", 0)
+                    strat[f"OrderQty{i}"] = state[f"order_qty{i}"]
+                    strat[f"TradedQty{i}"] = state[f"traded_qty{i}"]
+                    strat[f"TotalQty{i}"] = state[f"order_qty{i}"]   # For display
+                else:
+                    state[f"order_qty{i}"] = 0
+                    state[f"traded_qty{i}"] = 0
+                    strat[f"OrderQty{i}"] = 0
+                    strat[f"TradedQty{i}"] = 0
+                    strat[f"TotalQty{i}"] = 0
 
-        self.active_strategies[name] = state
+            self.active_strategies[name] = state
 
     def remove_strategy(self, name):
-        if name in self.active_strategies:
-            del self.active_strategies[name]
+        # FIX: Use lock
+        with self.state_lock:
+            if name in self.active_strategies:
+                del self.active_strategies[name]
 
     def resume_strategy(self, name):
-        if name in self.active_strategies:
-            state = self.active_strategies[name]
-            if state["status"] == "disabled":
-                state["status"] = "waiting"
-                self.update_status_signal.emit(name, "waiting")
-                self._tick(state)   # Ensure logic is re-activated!
-                log_event(name, "Strategy Resumed", "Strategy status reset to waiting after being disabled.")
+        # FIX: Use lock
+        with self.state_lock:
+            if name in self.active_strategies:
+                state = self.active_strategies[name]
+                if state["status"] == "disabled":
+                    state["status"] = "waiting"
+                    self.update_status_signal.emit(name, "waiting")
+                    log_event(name, "Strategy Resumed", "Strategy status reset to waiting after being disabled.")
+        
+        # Tick outside the lock to avoid deadlock
+        if 'state' in locals():
+             self._tick(state)   # Ensure logic is re-activated!
 
 
     def pause_strategy(self, name):
-        if name in self.active_strategies:
-            self.active_strategies[name]["status"] = "disabled"
+        # FIX: Use lock
+        with self.state_lock:
+            if name in self.active_strategies:
+                self.active_strategies[name]["status"] = "disabled"
 
     def stop(self):
         self.running = False
@@ -270,7 +303,11 @@ class StrategyExecutor(QThread):
     
     def run(self):
         while self.running:
-            for state in list(self.active_strategies.values()):
+            # FIX: Safely get a list of states to iterate over
+            with self.state_lock:
+                states_to_tick = list(self.active_strategies.values())
+                
+            for state in states_to_tick:
                 self._tick(state, force_emit_diff=True)
             time.sleep(0.1)
 
@@ -287,7 +324,11 @@ class StrategyExecutor(QThread):
             token_value = strat.get(token_key) # Get the actual token string
             if token_value: # Check if the token string exists
                 total_qty = int(strat.get(lots_key, 0))
-                traded_qty = int(state.get(traded_key, 0))
+                
+                # FIX: Use lock to safely read state
+                with self.state_lock:
+                    traded_qty = int(state.get(traded_key, 0))
+                
                 open_qty = total_qty - traded_qty
                 
                 # Use the 'token_value' here, not 'token_key'
@@ -313,22 +354,32 @@ class StrategyExecutor(QThread):
                             Quantity=open_qty,
                             CancelIfNotCompleteInSeconds=0,
                         )
-                        state.setdefault("order_request_ids", []).append(req_id)
+                        # FIX: Use lock
+                        with self.state_lock:
+                            state.setdefault("order_request_ids", []).append(req_id)
                         log_event(strat["Strategy Name"], "Square Off", f"Market {counter_side} {open_qty} of {strat[token_key]}")
                     except Exception as e:
                         log_event(strat["Strategy Name"], "Square Off Error", f"Leg {i}: {e}")
-
-        state["status"] = "squared_off"
+        
+        # FIX: Use lock
+        with self.state_lock:
+            state["status"] = "squared_off"
         self.update_status_signal.emit(strat["Strategy Name"], "squared_off")
         log_event(strat["Strategy Name"], "Square Off", "All open positions sent for square off at market.")
 
     def _tick(self, state, force_emit_diff=False):
-        strat = state["strategy"]
-        status = state["status"]
+        # FIX: Use lock to get a consistent snapshot of strategy and status
+        with self.state_lock:
+            strat = state["strategy"]
+            status = state["status"]
+            # Create local copies of qty data
+            order_qtys_local = [state.get(f"order_qty{i}", 0) for i in range(1, 9)]
+            traded_qtys_local = [state.get(f"traded_qty{i}", 0) for i in range(1, 9)]
 
         legs = []
-        order_qtys = []
-        traded_qtys = []
+        prices = []
+        lot_sizes = []
+        has_bad_price = False
 
         # Collect only valid legs
         for i in range(1, 9):
@@ -337,49 +388,64 @@ class StrategyExecutor(QThread):
             qty = float(strat.get(f"TotalQty{i}", 0) or 0)
             if not token or not side or qty == 0:
                 continue  # Skip unused/blank legs
-            price = xts_get_ltp(token) or 0.0
+            
+            price = xts_get_ltp(token)
+            
+            # FIX: Critical bug fix for bad LTP
+            if price is None or price <= 0:
+                has_bad_price = True # Mark that we have a bad price
+                prices.append(0.0) # Append a placeholder
+            else:
+                prices.append(price)
+
             try:
                 lot_size = int(get_lot_size(token) or 1)
             except Exception:
                 lot_size = 1
             lots = int(strat.get(f"Lots{i}", 1))
             legs.append((side, lots, price, lot_size, token))
-            order_qtys.append(state.get(f"order_qty{i}", lots * lot_size))
-            traded_qtys.append(state.get(f"traded_qty{i}", 0))
-
+            lot_sizes.append(lot_size)
+            
         num_legs = len(legs)
         if num_legs == 0:
-            # No valid legs, cannot proceed
             self.update_diff_signal.emit(strat.get("Strategy Name", ""), 0.0)
             return
 
+        # FIX: Do not calculate or trigger if any leg has a bad price
+        if has_bad_price:
+            self.update_diff_signal.emit(strat.get("Strategy Name", ""), state.get("last_diff", 0.0))
+            # Emit current qty status even if price is bad
+            self.update_qty_signal.emit(strat.get("Strategy Name", ""), list(zip(order_qtys_local, traded_qtys_local)))
+            return
+
         # --- MODIFICATION START ---
-        # --- New Difference Calculation Logic based on user request ---
-        # Formula: (total amount buy - total amount sell) / (total shares buyed (accross all leg))
+        # --- Use helper function for diff calculation ---
+        # Create the 'legs' structure expected by the helper
+        helper_legs = []
+        for i in range(num_legs):
+             helper_legs.append({'side': legs[i][0], 'lots': legs[i][1]})
         
-        total_buy_value = sum(abs(lots) * lot_size * price for (side, lots, price, lot_size, _) in legs if side == "BUY")
-        total_sell_value = sum(abs(lots) * lot_size * price for (side, lots, price, lot_size, _) in legs if side == "SELL")
-
-        # Denominator is the total quantity of *all BUY legs*
-        total_buy_quantity = sum(abs(lots) * lot_size for (side, lots, _, lot_size, _) in legs if side == "BUY")
-
-        net = 0.0
-        if total_buy_quantity > 0:
-            net = (total_buy_value - total_sell_value) / total_buy_quantity
+        net = calculate_per_ratio_diff(helper_legs, prices, lot_sizes)
         # --- MODIFICATION END ---
+        
+        # Store last valid diff
+        with self.state_lock:
+            state["last_diff"] = net
 
 
         # Always emit diff for GUI, even if disabled
         self.update_diff_signal.emit(strat.get("Strategy Name", ""), net)
-        self.update_qty_signal.emit(strat.get("Strategy Name", ""), list(zip(order_qtys, traded_qtys)))
+        self.update_qty_signal.emit(strat.get("Strategy Name", ""), list(zip(order_qtys_local, traded_qtys_local)))
 
         threshold = float(strat.get("Diff Threshold") or 0)
 
         if status == "waiting":
             if net>=threshold:
-
-                state["entry_diff"] = net
-                state["status"] = "triggered"
+                # FIX: Use lock to update state
+                with self.state_lock:
+                    state["entry_diff"] = net
+                    state["status"] = "triggered"
+                
                 self.update_status_signal.emit(strat["Strategy Name"], "triggered")
                 log_event(strat["Strategy Name"], "Triggered", f"at diff {net:.2f}")
 
@@ -419,7 +485,9 @@ class StrategyExecutor(QThread):
                             Quantity=qty_k,
                             CancelIfNotCompleteInSeconds=1,
                         )
-                        state.setdefault("order_request_ids", []).append(reqid_k)
+                        # FIX: Use lock
+                        with self_ref.state_lock:
+                            state.setdefault("order_request_ids", []).append(reqid_k)
 
                         filled_qty_k = 0
                         elapsed = 0
@@ -454,7 +522,10 @@ class StrategyExecutor(QThread):
                                     Quantity=unfilled_qty,
                                     CancelIfNotCompleteInSeconds=wait_sec,
                                 )
-                                state.setdefault("order_request_ids", []).append(reqid_k_retry)
+                                # FIX: Use lock
+                                with self_ref.state_lock:
+                                    state.setdefault("order_request_ids", []).append(reqid_k_retry)
+                                
                                 # Wait for fill or timeout
                                 elapsed_retry = 0
                                 while elapsed_retry < wait_sec:
@@ -489,16 +560,19 @@ class StrategyExecutor(QThread):
                                     Quantity=qty_k - filled_qty_k,
                                     CancelIfNotCompleteInSeconds=0,  # Good till filled/cancelled
                                 )
-                                state.setdefault("order_request_ids", []).append(reqid_k_fallback)
+                                # FIX: Use lock
+                                with self_ref.state_lock:
+                                    state.setdefault("order_request_ids", []).append(reqid_k_fallback)
                                 # No wait: let risk management or manual intervention handle further
-
-                        # Update state as before
-                        prev_traded_k = state.get(f"traded_qty{k+1}", 0)
-                        state[f"traded_qty{k+1}"] = prev_traded_k + filled_qty_k
-                        state[f"entry_price_total{k+1}"] = state.get(f"entry_price_total{k+1}", 0.0) + filled_qty_k * limit_price_k
-                        state[f"entry_price{k+1}"] = (
-                            state[f"entry_price_total{k+1}"] / state[f"traded_qty{k+1}"] if state[f"traded_qty{k+1}"] > 0 else 0.0
-                        )
+                        
+                        # FIX: Use lock to update state
+                        with self_ref.state_lock:
+                            prev_traded_k = state.get(f"traded_qty{k+1}", 0)
+                            state[f"traded_qty{k+1}"] = prev_traded_k + filled_qty_k
+                            state[f"entry_price_total{k+1}"] = state.get(f"entry_price_total{k+1}", 0.0) + filled_qty_k * limit_price_k
+                            state[f"entry_price{k+1}"] = (
+                                state[f"entry_price_total{k+1}"] / state[f"traded_qty{k+1}"] if state[f"traded_qty{k+1}"] > 0 else 0.0
+                            )
                     except Exception as e:
                         log_event(strat["Strategy Name"], f"Leg {k+1} hedge order error", str(e))
 
@@ -506,15 +580,18 @@ class StrategyExecutor(QThread):
                     num_legs = len(legs)
                     sides = [leg[0] for leg in legs]
                     ratios = [leg[1] for leg in legs]
-                    lot_sizes = [leg[3] for leg in legs]
+                    lot_sizes_list = [leg[3] for leg in legs] # Use the locally gathered list
                     tokens = [strat[f"Token{i}"] for i in range(1, num_legs+1)]
                     initial_ltps = [xts_get_ltp(t) for t in tokens]
                     initial_leg1_price = initial_ltps[0]
                     initial_other_prices = initial_ltps[1:]
 
-                    order_qtys = [state.get(f"order_qty{i+1}", ratios[i] * lot_sizes[i]) for i in range(num_legs)]
-                    traded_qtys = [state.get(f"traded_qty{i+1}", 0) for i in range(num_legs)]
-                    to_trade = order_qtys[0] - traded_qtys[0]
+                    # FIX: Use lock to read state
+                    with self.state_lock:
+                        order_qtys_list = [state.get(f"order_qty{i+1}", ratios[i] * lot_sizes_list[i]) for i in range(num_legs)]
+                        traded_qtys_list = [state.get(f"traded_qty{i+1}", 0) for i in range(num_legs)]
+                    
+                    to_trade = order_qtys_list[0] - traded_qtys_list[0]
                     if to_trade <= 0:
                         return
 
@@ -540,7 +617,10 @@ class StrategyExecutor(QThread):
                         Quantity=to_trade,
                         CancelIfNotCompleteInSeconds=1,
                     )
-                    state.setdefault("order_request_ids", []).append(req_id)
+                    # FIX: Use lock
+                    with self.state_lock:
+                        state.setdefault("order_request_ids", []).append(req_id)
+                    
                     last_leg1_price = leg1_price
                     total_filled_leg1 = 0
                     start_time = time.time()
@@ -576,10 +656,10 @@ class StrategyExecutor(QThread):
                         filled_qty_leg1 = partial_filled 
 
                         if filled_qty_leg1 > 0:
-                            qty1 = order_qtys[0] 
+                            qty1 = order_qtys_list[0] 
                             if qty1 > 0:
                                 for k in range(1, num_legs):
-                                    qty_k = order_qtys[k]
+                                    qty_k = order_qtys_list[k]
                                    
                                     hedge_qty = int((qty_k / qty1) * filled_qty_leg1) 
                                     
@@ -601,26 +681,16 @@ class StrategyExecutor(QThread):
                                         )
                                         t.daemon = True
                                         t.start()
-                            if hedge_qty > 0:
-                                t = threading.Thread(
-                                    target=fire_leg_k,
-                                    args=(
-                                        k - 1,  
-                                        hedge_qty,
-                                        state,
-                                        strat,
-                                        tokens,
-                                        sides,
-                                        self,
-                                        last_leg1_price,
-                                        state["entry_diff"],
-                                        sides[0].upper()
-                                    )
-                                )
-                                t.daemon = True
-                                t.start()
+                            
+                            # FIX: BUG REMOVED. This block was a copy-paste error and caused a duplicate order.
+                            # if hedge_qty > 0:
+                            #     ... (stray code removed) ...
 
-                            self.update_qty_signal.emit(strat.get("Strategy Name", ""), [(order_qtys[i], state.get(f"traded_qty{i+1}", 0)) for i in range(num_legs)])
+                            # FIX: Read qtys from local snapshot
+                            with self.state_lock:
+                                qtys_now = [(order_qtys_list[i], state.get(f"traded_qty{i+1}", 0)) for i in range(num_legs)]
+                            self.update_qty_signal.emit(strat.get("Strategy Name", ""), qtys_now)
+
                         iter_end = time.time()
                         if iter_end - start_time >= 1.0:
                                 break
@@ -630,12 +700,17 @@ class StrategyExecutor(QThread):
                         log_event(strat["Strategy Name"], "Order Cancel", f"Unfilled qty cancelled after 1s")
                     except Exception as e:
                         log_event(strat["Strategy Name"], "Cancel error", str(e))
-                    total_filled_leg1 = state.get("traded_qty1", 0)  # Or whatever variable tracks this in your logic
-                    target_qty = state.get("order_qty1", 0)
+                    
+                    # FIX: Use lock to read state
+                    with self.state_lock:
+                        total_filled_leg1 = state.get("traded_qty1", 0)
+                        target_qty = state.get("order_qty1", 0)
+                        current_status = state["status"] # Check status inside lock
 
                     if total_filled_leg1 == 0:
-                        if state["status"] != "disabled":
-                            state["status"] = "waiting"
+                        if current_status != "disabled":
+                            with self.state_lock:
+                                state["status"] = "waiting"
                             self.update_status_signal.emit(strat["Strategy Name"], "waiting")
                             log_event(strat["Strategy Name"], "LEG1_CANCELLED", "No fill after all retries, status reset to waiting.")
                         else:
@@ -643,8 +718,9 @@ class StrategyExecutor(QThread):
                         return
 
                     if total_filled_leg1 < target_qty:
-                        if state["status"] != "disabled":
-                            state["status"] = "waiting"
+                        if current_status != "disabled":
+                            with self.state_lock:
+                                state["status"] = "waiting"
                             self.update_status_signal.emit(strat["Strategy Name"], "waiting")
                             log_event(
                                 strat["Strategy Name"],
@@ -669,8 +745,13 @@ class StrategyExecutor(QThread):
         if status == "triggered":
             abs_pnl = 0
             for idx, (side, lots, _, lot_size, token) in enumerate(legs, 1):
-                traded_qty = state.get(f"traded_qty{idx}", 0)
-                entry_price = state.get(f"entry_price{idx}", None)
+                # FIX: Use local snapshot of qtys
+                traded_qty = traded_qtys_local[idx-1]
+                
+                # FIX: Use lock to read entry price
+                with self.state_lock:
+                    entry_price = state.get(f"entry_price{idx}", None)
+                
                 if traded_qty > 0 and entry_price is not None:
                     current_price = xts_get_ltp(token)
                     if side == "BUY":
@@ -678,10 +759,16 @@ class StrategyExecutor(QThread):
                     else:
                         leg_pnl = (entry_price - current_price) * traded_qty
                     abs_pnl += leg_pnl
-            strat['P&L'] = round(abs_pnl, 2)
+            
+            # FIX: Use lock to update P&L in strategy dict
+            with self.state_lock:
+                strat['P&L'] = round(abs_pnl, 2)
             self.update_pnl_signal.emit(strat['Strategy Name'], abs_pnl)
 
-            entry_diff = float(state.get("entry_diff", net))
+            # FIX: Use lock to read entry_diff
+            with self.state_lock:
+                entry_diff = float(state.get("entry_diff", net))
+
             sl_raw = strat.get("SL", 0)
             tp_raw = strat.get("TP", 0)
             sl_mode = strat.get("SL_Mode", "diff")
@@ -703,73 +790,92 @@ class StrategyExecutor(QThread):
             if tp:
                 if tp_mode == "abs":
                     if entry_diff >= 0 and net >= tp:
-                        state["status"] = "tp_hit"
+                        with self.state_lock: # FIX: Use lock
+                            state["status"] = "tp_hit"
                         log_event(strat["Strategy Name"], "TP Hit", f"(Abs, Buy) net={net:.2f} >= tp={tp:.2f}")
                         self.square_off(state)
-                        self.update_status_signal.emit(strat.get("Strategy Name", ""), state["status"])
+                        self.update_status_signal.emit(strat.get("Strategy Name", ""), "tp_hit")
                         return
                     elif entry_diff < 0 and net <= tp:
-                        state["status"] = "tp_hit"
+                        with self.state_lock: # FIX: Use lock
+                            state["status"] = "tp_hit"
                         log_event(strat["Strategy Name"], "TP Hit", f"(Abs, Sell) net={net:.2f} <= tp={tp:.2f}")
                         self.square_off(state)
-                        self.update_status_signal.emit(strat.get("Strategy Name", ""), state["status"])
+                        self.update_status_signal.emit(strat.get("Strategy Name", ""), "tp_hit")
                         return
                 else:  
                     if entry_diff >= 0 and net >= entry_diff + abs(tp):
-                        state["status"] = "tp_hit"
+                        with self.state_lock: # FIX: Use lock
+                            state["status"] = "tp_hit"
                         log_event(strat["Strategy Name"], "TP Hit", f"(Diff, Buy) net={net:.2f} >= entry+tp={entry_diff+abs(tp):.2f}")
                         self.square_off(state)
-                        self.update_status_signal.emit(strat.get("Strategy Name", ""), state["status"])
+                        self.update_status_signal.emit(strat.get("Strategy Name", ""), "tp_hit")
                         return
                     elif entry_diff < 0 and net <= entry_diff - abs(tp):
-                        state["status"] = "tp_hit"
+                        with self.state_lock: # FIX: Use lock
+                            state["status"] = "tp_hit"
                         log_event(strat["Strategy Name"], "TP Hit", f"(Diff, Sell) net={net:.2f} <= entry-tp={entry_diff-abs(tp):.2f}")
                         self.square_off(state)
-                        self.update_status_signal.emit(strat.get("Strategy Name", ""), state["status"])
+                        self.update_status_signal.emit(strat.get("Strategy Name", ""), "tp_hit")
                         return
 
             if sl:
                 if sl_mode == "abs":
                     if entry_diff >= 0 and net <= sl:
-                        state["status"] = "sl_hit"
+                        with self.state_lock: # FIX: Use lock
+                            state["status"] = "sl_hit"
                         log_event(strat["Strategy Name"], "SL Hit", f"(Abs, Buy) net={net:.2f} <= sl={sl:.2f}")
                         self.square_off(state)
-                        self.update_status_signal.emit(strat.get("Strategy Name", ""), state["status"])
+                        self.update_status_signal.emit(strat.get("Strategy Name", ""), "sl_hit")
                         return
                     elif entry_diff < 0 and net >= sl:
-                        state["status"] = "sl_hit"
+                        with self.state_lock: # FIX: Use lock
+                            state["status"] = "sl_hit"
                         log_event(strat["Strategy Name"], "SL Hit", f"(Abs, Sell) net={net:.2f} >= sl={sl:.2f}")
                         self.square_off(state)
-                        self.update_status_signal.emit(strat.get("Strategy Name", ""), state["status"])
+                        self.update_status_signal.emit(strat.get("Strategy Name", ""), "sl_hit")
                         return
                 else:  # Diff mode
                     if entry_diff >= 0 and net <= entry_diff - abs(sl):
-                        state["status"] = "sl_hit"
+                        with self.state_lock: # FIX: Use lock
+                            state["status"] = "sl_hit"
                         log_event(strat["Strategy Name"], "SL Hit", f"(Diff, Buy) net={net:.2f} <= entry-sl={entry_diff-abs(sl):.2f}")
                         self.square_off(state)
-                        self.update_status_signal.emit(strat.get("Strategy Name", ""), state["status"])
+                        self.update_status_signal.emit(strat.get("Strategy Name", ""), "sl_hit")
                         return
                     elif entry_diff < 0 and net >= entry_diff + abs(sl):
-                        state["status"] = "sl_hit"
+                        with self.state_lock: # FIX: Use lock
+                            state["status"] = "sl_hit"
                         log_event(strat["Strategy Name"], "SL Hit", f"(Diff, Sell) net={net:.2f} >= entry+sl={entry_diff+abs(sl):.2f}")
                         self.square_off(state)
-                        self.update_status_signal.emit(strat.get("Strategy Name", ""), state["status"])
+                        self.update_status_signal.emit(strat.get("Strategy Name", ""), "sl_hit")
                         return
         if status == "disabled" and not force_emit_diff:
             return
 
-
-        for idx in range(1, num_legs + 1):
-            strat[f"OrderQty{idx}"] = state.get(f"order_qty{idx}", 0)
-            strat[f"TradedQty{idx}"] = state.get(f"traded_qty{idx}", 0)
-        self.update_qty_signal.emit(strat.get("Strategy Name", ""), list(zip(order_qtys, traded_qtys)))
+        # FIX: Use lock to update strategy dict
+        with self.state_lock:
+            for idx in range(1, num_legs + 1):
+                strat[f"OrderQty{idx}"] = state.get(f"order_qty{idx}", 0)
+                strat[f"TradedQty{idx}"] = state.get(f"traded_qty{idx}", 0)
+        
+        self.update_qty_signal.emit(strat.get("Strategy Name", ""), list(zip(order_qtys_local, traded_qtys_local)))
 
 
     def kill_switch(self):
-        for strat_name, state in self.active_strategies.items():
+        # FIX: Use lock to get a snapshot of strategies
+        with self.state_lock:
+            strategies_to_kill = list(self.active_strategies.items())
+
+        for strat_name, state in strategies_to_kill:
             strat = state["strategy"]
+            
+            # FIX: Use lock to read order IDs
+            with self.state_lock:
+                order_ids = list(state.get("order_request_ids", []))
+            
             # --- Cancel all app-placed orders ---
-            for order_id in state.get("order_request_ids", []):
+            for order_id in order_ids:
                 try:
                     order_bridge.IB_CancelOrExitOrder(order_id)
                     log_event(strat["Strategy Name"], "Kill Switch", f"Cancelled Order {order_id}")
@@ -778,13 +884,15 @@ class StrategyExecutor(QThread):
 
             # --- Square off any open positions from this strategy ---
             try:
-                self.square_off(state)
+                self.square_off(state) # square_off is internally thread-safe
                 log_event(strat["Strategy Name"], "Kill Switch", "Strategy squared off.")
             except Exception as e:
                 log_event(strat["Strategy Name"], "Kill Switch Error", f"Square-off: {str(e)}")
 
             # --- Stop the strategy ---
-            state["status"] = "disabled"
+            # FIX: Use lock to update status
+            with self.state_lock:
+                state["status"] = "disabled"
 
         self.update_status_signal.emit("SYSTEM", "All strategies stopped by kill switch.")
         print("[SYSTEM] Kill Switch All strategies stopped by kill switch.")

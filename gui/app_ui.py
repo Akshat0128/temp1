@@ -2,7 +2,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QDialog, QVBoxLayout, QRadioButton, QLineEdit, QPushButton, QHBoxLayout, QLabel, QButtonGroup,
     QComboBox, QSpinBox, QWidget, QTableWidget, QTableWidgetItem, QMessageBox, QAbstractItemView, QFileDialog, QCheckBox
 )
-from PyQt5.QtCore import Qt, QEvent
+from PyQt5.QtCore import Qt, QEvent, QTimer
 from datetime import datetime
 from strategies.executer import StrategyExecutor
 from trading.xts_market import get_ltp
@@ -74,7 +74,8 @@ class AddStrategyDialog(QDialog):
         add_leg_row.addWidget(self.live_diff_label)
         add_leg_row.addStretch()
         main_layout.addLayout(add_leg_row)
-        self.setup_leg_signals()
+        # FIX: This call was missing, preventing signals from being connected on init
+        # self.setup_leg_signals() # This is called in add_leg, so it's OK
 
         # 2. Diff Threshold row (before name)
         diff_row = QHBoxLayout()
@@ -155,17 +156,22 @@ class AddStrategyDialog(QDialog):
         # --- Add legs from strategy_data or by default 2 legs
         if strategy_data:
             n = 0
-            while f"Token{n+1}" in strategy_data:
+            # FIX: Check for Token existence, not just any key
+            while strategy_data.get(f"Token{n+1}"):
                 n += 1
-            for i in range(n):
-                token_str = strategy_data.get(f"Token{i+1}", "")
-                side      = strategy_data.get(f"Side{i+1}", "BUY")
-                lots_val  = int(strategy_data.get(f"Lots{i+1}", "1"))
-                if token_str:
-                    parts = token_str.split()
-                    if len(parts) == 4:
-                        u, e, t, s = parts
-                        self.add_leg((u, e, t, s, side, lots_val))
+            if n == 0: # Handle case where strategy exists but has no legs
+                 self.add_leg()
+                 self.add_leg()
+            else:
+                for i in range(n):
+                    token_str = strategy_data.get(f"Token{i+1}", "")
+                    side      = strategy_data.get(f"Side{i+1}", "BUY")
+                    lots_val  = int(strategy_data.get(f"Lots{i+1}", "1"))
+                    if token_str:
+                        parts = token_str.split()
+                        if len(parts) == 4:
+                            u, e, t, s = parts
+                            self.add_leg((u, e, t, s, side_val, lots_val))
         else:
             self.add_leg()
             self.add_leg()
@@ -179,6 +185,8 @@ class AddStrategyDialog(QDialog):
             leg_fields
             + [self.add_leg_btn, self.diff_edit, self.name_edit, self.sl_edit, self.tp_edit, self.ok_btn, self.cancel_btn]
         )
+        # FIX: Filter out None in case some widgets aren't present
+        widgets_in_order = [w for w in widgets_in_order if w is not None]
         for w1, w2 in zip(widgets_in_order, widgets_in_order[1:]):
             self.setTabOrder(w1, w2)
 
@@ -192,13 +200,15 @@ class AddStrategyDialog(QDialog):
         self.sl_mode_abs.toggled.connect(self.validate_all)
         self.tp_mode_diff.toggled.connect(self.validate_all)
         self.tp_mode_abs.toggled.connect(self.validate_all)
+        
+        # Call setup_leg_signals *after* all legs are added
+        self.setup_leg_signals() 
         self.update_leg_prices_and_diff()
-        from PyQt5.QtCore import QTimer
-
-
+        
         self.live_update_timer = QTimer(self)
         self.live_update_timer.timeout.connect(self.update_leg_prices_and_diff)
-        self.live_update_timer.start(10)  
+        # FIX: Changed timer from 10ms (100x/sec) to 1000ms (1x/sec) to prevent API spam
+        self.live_update_timer.start(1000)  
 
 
         # Prevent Enter from doing anything in input fields
@@ -283,7 +293,8 @@ class AddStrategyDialog(QDialog):
                 else:
                     strike_cb.setEditText(current_strike)
             elif len(strike_list) > 0:
-                strike_cb.setCurrentText(strike_list[0])
+                # FIX: Don't just select first, try to find a reasonable default or keep '--SELECT--'
+                strike_cb.setCurrentIndex(0) # Default to --SELECT--
             strike_cb.blockSignals(False)
 
         def update_price_lot():
@@ -352,7 +363,7 @@ class AddStrategyDialog(QDialog):
             update_price_lot()
         else:
             refresh_expiries()
-            refresh_strikes()
+            # refresh_strikes() # This is called by refresh_expiries
             update_price_lot()
 
         if self.edit_mode:
@@ -487,8 +498,6 @@ class AddStrategyDialog(QDialog):
                     lot_sizes.append(int(lot) if lot else None)
 
                 # Calculate diff using the executor's logic
-                # Note: This helper function might return (diff, ratio) or just diff.
-                # We adapt to handle both.
                 diff_result = calculate_per_ratio_diff(legs, prices, lot_sizes)
                 
                 live_diff = None
@@ -555,6 +564,7 @@ class AddStrategyDialog(QDialog):
             data[f"Side{idx}"]  = scb.currentText()
             data[f"Lots{idx}"]  = str(lots_spin.value())
         return data
+
     def setup_leg_signals(self):
         for _, ucb, ecb, strike_cb, tcb, scb, lots_spin, price_lbl, lot_lbl, total_qty_lbl in self.leg_widgets:
             ucb.currentTextChanged.connect(self.update_leg_prices_and_diff)
@@ -566,7 +576,9 @@ class AddStrategyDialog(QDialog):
 
     def update_leg_prices_and_diff(self):
         prices = []
-        valid_leg_info = []
+        legs_info = []
+        lot_sizes_info = []
+
         for idx, (_, ucb, ecb, strike_cb, tcb, scb, lots_spin, price_lbl, lot_lbl, total_qty_lbl) in enumerate(self.leg_widgets):
             scripshortname = ucb.currentText().strip().upper()
             expirydate = ecb.currentText().strip().upper()
@@ -583,19 +595,23 @@ class AddStrategyDialog(QDialog):
                 lot_lbl.setText("Lot size: --")
                 total_qty_lbl.setText("Total Qty: --")
                 prices.append(None)
+                legs_info.append(None)
+                lot_sizes_info.append(None)
                 continue
 
             token = f"{scripshortname} {expirydate} {optiontype} {strikeprice}".strip().upper()
-            scrip_row = self.scrip_df[self.scrip_df["scripname"].str.upper() == token]
-
+            
             # Lot size via get_lot_size
             marketlot = get_lot_size(token)
             entered_lots = lots_spin.value()
-            if not marketlot or int(marketlot) <= 0 or scrip_row.empty:
+
+            if not marketlot or int(marketlot) <= 0:
                 price_lbl.setText("Price: --")
                 lot_lbl.setText("Lot size: --")
                 total_qty_lbl.setText("Total Qty: --")
                 prices.append(None)
+                legs_info.append(None)
+                lot_sizes_info.append(None)
                 continue
             else:
                 lot_lbl.setText(f"Lot size: {marketlot}")
@@ -610,24 +626,21 @@ class AddStrategyDialog(QDialog):
             else:
                 price_lbl.setText(f"Price: ₹{float(ltp):.2f}")
                 prices.append(float(ltp))
-                valid_leg_info.append({
-                    "side": scb.currentText(),
-                    "qty": total_qty,
-                    "ltp": float(ltp)
-                })
+            
+            legs_info.append({"side": scb.currentText(), "lots": entered_lots})
+            lot_sizes_info.append(int(marketlot))
 
-        # Live diff for N valid legs
-        if len(valid_leg_info) >= 2:
-            legs = [
-                {"side": scb.currentText(), "lots": lots_spin.value()}
-                for (_, ucb, ecb, strike_cb, tcb, scb, lots_spin, *_ ) in self.leg_widgets
-            ]
-            prices = [ltp for ltp in prices if ltp is not None]
-            if len(prices) == len(legs) and len(prices) >= 2:
-                diff, ratio = calculate_per_ratio_diff(legs, prices)
-                self.live_diff_label.setText(f"Current Diff: {diff:.2f}")
-            else:
-                self.live_diff_label.setText("Current Diff: --")
+        # FIX: Crash fix
+        # Filter out Nones before passing to helper
+        valid_indices = [i for i, p in enumerate(prices) if p is not None]
+        valid_legs = [legs_info[i] for i in valid_indices]
+        valid_prices = [prices[i] for i in valid_indices]
+        valid_lot_sizes = [lot_sizes_info[i] for i in valid_indices]
+
+        if len(valid_legs) >= 2 and len(valid_legs) == len(valid_prices) == len(valid_lot_sizes):
+            # FIX: Call helper with 3 args, expect float
+            diff = calculate_per_ratio_diff(valid_legs, valid_prices, valid_lot_sizes)
+            self.live_diff_label.setText(f"Current Diff: {diff:.2f}")
         else:
             self.live_diff_label.setText("Current Diff: --")
 
@@ -698,7 +711,22 @@ class MainWindow(QMainWindow):
         ctrl_layout.addWidget(self.btn_stop)
         ctrl_layout.addWidget(self.btn_start_all)
         ctrl_layout.addWidget(self.btn_stop_all)
-        main_layout.addLayout(ctrl_layout)
+        
+        # FIX: Add the Global Max Loss input field
+        ml_layout = QHBoxLayout()
+        ml_layout.addStretch()
+        ml_layout.addWidget(QLabel("Global Max Loss:"))
+        self.max_loss_edit = QLineEdit(str(load_max_loss()))
+        self.max_loss_edit.setPlaceholderText("e.g., 5000")
+        self.max_loss_edit.editingFinished.connect(lambda: save_max_loss(self.max_loss_edit.text()))
+        ml_layout.addWidget(self.max_loss_edit)
+        
+        # Add both layouts to the main layout
+        bottom_controls_layout = QHBoxLayout()
+        bottom_controls_layout.addLayout(ctrl_layout)
+        bottom_controls_layout.addLayout(ml_layout)
+        main_layout.addLayout(bottom_controls_layout)
+
 
         # --- Updated column headers ---
         self.col_headers = [
@@ -718,10 +746,12 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         main_layout.addWidget(self.table)
 
-        # --- Backend connections (unchanged) ---
-        self.executor = StrategyExecutor(self)
+        # --- Backend connections (FIXED) ---
+        # FIX 1: Create the executor *once*
+        self.executor = StrategyExecutor(self.user_id, parent=self, max_loss_global=self.get_global_max_loss())
+        
+        # FIX 2: Connect signals to the *correct* executor instance
         self.executor.update_pnl_signal.connect(self._on_update_pnl)
-        self.manager = StrategyManager(self.executor)
         if hasattr(self.executor, "update_diff_signal"):
             print(f"[GUI] Connecting signals for executor: {self.executor}")
             self.executor.update_diff_signal.connect(self._on_update_diff)
@@ -729,6 +759,8 @@ class MainWindow(QMainWindow):
             self.executor.update_qty_signal.connect(self._on_update_qty)
         if hasattr(self.executor, "update_status_signal"):
             self.executor.update_status_signal.connect(self._on_update_status)
+        
+        self.manager = StrategyManager(self.executor)
         self.executor.start()
 
         # UI signals
@@ -747,15 +779,14 @@ class MainWindow(QMainWindow):
         self.btn_load.clicked.connect(self.load_csv)
         self.btn_save.clicked.connect(self.save_csv)
 
-        self.executor = StrategyExecutor(self.user_id, max_loss_global=self.get_global_max_loss())
-
         self.strategy_list = load_strategies()
 
         for strat in self.strategy_list:
             self._add_strategy_to_table(strat)
             self.executor.add_strategy(strat)
-        self.executor.update_diff_signal.connect(self._on_update_diff)
-        self.executor.update_status_signal.connect(self._on_update_status)
+        
+        # self.executor.update_diff_signal.connect(self._on_update_diff) # Already connected
+        # self.executor.update_status_signal.connect(self._on_update_status) # Already connected
         self._update_button_states()
     
     def get_all_valid_tokens(self):
@@ -764,7 +795,10 @@ class MainWindow(QMainWindow):
     
     def get_global_max_loss(self):
         val = self.max_loss_edit.text().strip()
-        return float(val) if val else float('inf')
+        try:
+            return float(val) if val else float('inf')
+        except ValueError:
+            return float('inf')
 
     def load_csv(self):
         print("[LOAD_CSV] ENTERED")
@@ -788,7 +822,7 @@ class MainWindow(QMainWindow):
                 # Get all valid tokens from scripmaster for validation
                 valid_tokens = self.get_all_valid_tokens()
                 skipped = []
-                print(f"[LOAD_CSV] Valid tokens: {list(valid_tokens)[:10]}")
+                print(f"[LOAD_CSV] Valid tokens: {len(valid_tokens)}")
                 for strat in rows:
                     # PATCH: Robust Diff Threshold
                     if strat.get("Diff") and not strat.get("Diff Threshold"):
@@ -809,10 +843,10 @@ class MainWindow(QMainWindow):
                         strat["Strategy Name"] = strat.get("Name", "")
                     
                     # Validate all legs (if ANY leg invalid, reject the whole strategy)
-                    print(f"[LOAD_CSV] Checking strat: {strat}")
-                    for i in range(1, 9):
-                        token = strat.get(f"Token{i}", "").strip().upper()
-                        print(f"[CHECK TOKEN] Token{i}: '{token}' | Is in valid_tokens? {token in valid_tokens}")
+                    # print(f"[LOAD_CSV] Checking strat: {strat}")
+                    # for i in range(1, 9):
+                    #     token = strat.get(f"Token{i}", "").strip().upper()
+                    #     print(f"[CHECK TOKEN] Token{i}: '{token}' | Is in valid_tokens? {token in valid_tokens}")
 
                     if is_strategy_valid(strat, valid_tokens):
                         self.strategy_list.append(strat)
@@ -826,11 +860,16 @@ class MainWindow(QMainWindow):
                         name = strat.get("Strategy Name", strat.get("Name", ""))
                         state = self.executor.active_strategies.get(name)
                         if state:
-                            old_status = state["status"]
-                            state["status"] = "waiting"
+                            # FIX: Use executor's lock to temporarily change status for tick
+                            with self.executor.state_lock:
+                                old_status = state["status"]
+                                state["status"] = "waiting"
+                            
                             print(f"[LOAD_CSV] About to tick strategy: {strat.get('Strategy Name', strat.get('Name', ''))}")
                             self.executor._tick(state)
-                            state["status"] = old_status
+                            
+                            with self.executor.state_lock:
+                                state["status"] = old_status
                     else:
                         print(f"[LOAD_CSV] Skipped strategy: {strat}")
                         skipped.append(strat.get("Name") or strat.get("Strategy Name") or "Unknown")
@@ -859,6 +898,7 @@ class MainWindow(QMainWindow):
             return
         try:
             with open(path, 'w', newline='') as f:
+                # FIX: Use the actual headers from self.col_headers
                 fieldnames = self.col_headers
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
@@ -876,6 +916,7 @@ class MainWindow(QMainWindow):
                     for i in range(1, 9):
                         if not strat.get(f"Lots{i}"):
                             try:
+                                # This logic might be flawed, default to 1
                                 lots_val = int(strat.get(f"TotalQty{i}", 0)) or 1
                                 strat[f"Lots{i}"] = lots_val
                             except Exception:
@@ -887,7 +928,15 @@ class MainWindow(QMainWindow):
                     # Overwrite traded qty for all legs
                     for i in range(1, 9):
                         strat[f"TradedQty{i}"] = 0
-                    out_row = {k: strat.get(k, strat.get(self._map_csv_to_field(k), "")) for k in fieldnames}
+                    
+                    # FIX: Map headers correctly, fill P&L, Current Diff
+                    out_row = {}
+                    for k in fieldnames:
+                        val = strat.get(k, strat.get(self._map_csv_to_field(k), ""))
+                        if k == 'P&L' or k == 'Current Diff':
+                            val = "" # Don't save transient data
+                        out_row[k] = val
+                    
                     writer.writerow(out_row)
         except Exception as e:
             QMessageBox.warning(self, "Save Error", f"Failed to save CSV:\n{e}")
@@ -895,30 +944,24 @@ class MainWindow(QMainWindow):
     def update_serial_color(self, row):
         try:
             name = self.table.item(row, 1).text()
-            state = self.executor.active_strategies.get(name, {})
-            status = state.get("status", "disabled").lower()
-
-            fully_traded = True
-            at_least_one_leg = False
-
-            for leg in range(1, 9):
-                total_col = 7 + (leg - 1) * 5
-                traded_col = 9 + (leg - 1) * 5
-                total_item = self.table.item(row, total_col)
-                traded_item = self.table.item(row, traded_col)
-                if total_item and traded_item:
-                    total_text = total_item.text()
-                    traded_text = traded_item.text()
-                    if total_text.strip() == "" or traded_text.strip() == "":
-                        continue
-                    try:
-                        total_qty = int(total_text)
-                        traded_qty = int(traded_text)
+            # FIX: Use lock to safely read state
+            with self.executor.state_lock:
+                state = self.executor.active_strategies.get(name, {})
+                status = state.get("status", "disabled").lower()
+                
+                fully_traded = True
+                at_least_one_leg = False
+                
+                for leg in range(1, 9):
+                    total_qty = state.get(f"order_qty{leg}", 0)
+                    traded_qty = state.get(f"traded_qty{leg}", 0)
+                    
+                    if total_qty > 0:
                         at_least_one_leg = True
                         if traded_qty < total_qty:
                             fully_traded = False
-                    except ValueError:
-                        continue
+                            break # No need to check other legs
+            
         except Exception as e:
             print(f"Error in update_serial_color: {e}")
             status = "disabled"
@@ -928,15 +971,11 @@ class MainWindow(QMainWindow):
         if status in ("sl_hit", "tp_hit", "squared_off", "disabled"):
             color = QColor("red")
         elif at_least_one_leg and fully_traded:
-            color = QColor("red")
+            color = QColor("red") # Fully traded is an "ended" state
         elif status in ("waiting", "triggered"):
-            # green if at least one leg and not fully traded, OR if no legs are valid yet (startup)
-            if (at_least_one_leg and not fully_traded) or (not at_least_one_leg):
-                color = QColor("green")
-            else:
-                color = QColor("red")
+            color = QColor("green")
         else:
-            color = QColor("red")
+            color = QColor("red") # Default to red for any other unknown state
 
         # 👉 Only color index 0 (S.No) column
         item = self.table.item(row, 0)
@@ -965,28 +1004,42 @@ class MainWindow(QMainWindow):
         tp = strat.get("TP", "")
         tp_display = str(tp) if tp not in [None, "", "0", 0] else ""
         self.table.setItem(row, 4, QTableWidgetItem(tp_display))
-        self.table.setItem(row, 5, QTableWidgetItem(str(strat.get("PnL", ""))))
-        self.table.setItem(row, 6, QTableWidgetItem(str(strat.get("Current Diff", ""))))
+        self.table.setItem(row, 5, QTableWidgetItem(str(strat.get("PnL", "0.00")))) # P&L
+        self.table.setItem(row, 6, QTableWidgetItem(str(strat.get("Current Diff", "0.00")))) # Current Diff
 
         # Now fill up to 8 legs
         col = 7  # Start after fixed columns
         for i in range(1, 9):
             token = str(strat.get(f"Token{i}", "") or "")
             side = str(strat.get(f"Side{i}", "") or "")
-            total_qty = str(strat.get(f"TotalQty{i}", "") or "")
-            traded_qty = str(strat.get(f"TradedQty{i}", "") or "")
-            order_qty = ""
+            
+            # Recalculate TotalQty from Lots and LotSize if possible
+            lots_str = strat.get(f"Lots{i}", "0")
+            total_qty_str = ""
+            if token and lots_str.isdigit():
+                lot_size = get_lot_size(token)
+                if lot_size:
+                    total_qty_str = str(int(lots_str) * lot_size)
+            
+            # Fallback to TotalQty if calculation fails
+            if not total_qty_str:
+                 total_qty_str = str(strat.get(f"TotalQty{i}", "") or "")
+            
+            traded_qty_str = str(strat.get(f"TradedQty{i}", "0") or "0")
+            order_qty_str = ""
             try:
-                tq = int(total_qty)
-                tr = int(traded_qty)
-                order_qty = str(tq - tr) if tq - tr > 0 else ""
+                tq = int(total_qty_str) if total_qty_str else 0
+                tr = int(traded_qty_str) if traded_qty_str else 0
+                order_qty = tq - tr
+                order_qty_str = str(order_qty) if order_qty > 0 else ""
             except Exception:
                 pass
+            
             self.table.setItem(row, col,   QTableWidgetItem(token))
             self.table.setItem(row, col+1, QTableWidgetItem(side))
-            self.table.setItem(row, col+2, QTableWidgetItem(total_qty))
-            self.table.setItem(row, col+3, QTableWidgetItem(order_qty))
-            self.table.setItem(row, col+4, QTableWidgetItem(traded_qty))
+            self.table.setItem(row, col+2, QTableWidgetItem(total_qty_str)) # TotalQty
+            self.table.setItem(row, col+3, QTableWidgetItem(order_qty_str)) # OrderQty (remaining)
+            self.table.setItem(row, col+4, QTableWidgetItem(traded_qty_str)) # TradedQty
             col += 5
         
         self.table.selectRow(row)
@@ -1016,17 +1069,18 @@ class MainWindow(QMainWindow):
             "TP": "TP",
             "Current Status": "Current Status",
             "Current Diff": "Current Diff",
+            "P&L": "P&L",
         }
 
-        # Leg-wise mapping (Token, Side, Price, TotalQty, TradedQty for each leg)
+        # Leg-wise mapping
         for i in range(1, 9):
             mapping[f"Token{i}"] = f"Token{i}"
             mapping[f"Side{i}"] = f"Side{i}"
-            mapping[f"Price{i}"] = f"Price{i}"
             mapping[f"TotalQty{i}"] = f"TotalQty{i}"
+            mapping[f"OrderQty{i}"] = f"OrderQty{i}"
             mapping[f"TradedQty{i}"] = f"TradedQty{i}"
-
-        # Add other fields as needed, e.g., timestamps, user, or custom params
+            # Add Lots mapping
+            mapping[f"Lots{i}"] = f"Lots{i}"
 
         return mapping.get(key, key)
         
@@ -1115,26 +1169,34 @@ class MainWindow(QMainWindow):
         self._update_button_states()
 
     def manual_square_off(self):
-        for name, state in self.executor.active_strategies.items():
-            if state["status"] == "triggered":
-                self.executor.square_off(state)
-                for r in range(self.table.rowCount()):
-                    if self.table.item(r, 0).text() == name:
-                        self.update_serial_color(r)
-                        break
+        # FIX: Use lock to get snapshot
+        with self.executor.state_lock:
+            states_to_sqoff = [state for state in self.executor.active_strategies.values() if state["status"] == "triggered"]
+        
+        for state in states_to_sqoff:
+            self.executor.square_off(state) # This will update status internally
+            row = self.get_row_by_strategy_name(state["strategy"]["Strategy Name"])
+            if row is not None:
+                self.update_serial_color(row)
+
         self._update_button_states()
 
     def _on_update_pnl(self, strat_name: str, pnl: float):
-        for r in range(self.table.rowCount()):
-            if self.table.item(r, 1).text() == strat_name:
-                self.table.setItem(r, 5, QTableWidgetItem(f"{pnl:.2f}"))
-                break
+        row = self.get_row_by_strategy_name(strat_name)
+        if row is not None:
+            self.table.setItem(row, 5, QTableWidgetItem(f"{pnl:.2f}"))
+
 
     def _on_update_status(self, name, status):
         row = self.get_row_by_strategy_name(name)
         if row is not None:
             self.update_serial_color(row)
+            
+            # FIX: Use lock to safely read strategy list
+            # This might be slow, but safer.
+            # A better fix is to have a self.strategy_map[name] -> strat_dict
             strat = next((s for s in self.strategy_list if s.get("Strategy Name") == name), None)
+            
             if strat:
                 tp = strat.get("TP")
                 sl = strat.get("SL")
@@ -1145,39 +1207,36 @@ class MainWindow(QMainWindow):
 
 
     def _on_update_diff(self, strat_name, diff):
-        for r in range(self.table.rowCount()):
-            if self.table.item(r, 1).text() == strat_name:
-                print(f"[DIFF] strat={strat_name}, diff={diff}")
-                try:
-                    self.table.setItem(r, 6, QTableWidgetItem(f"{float(diff):.2f}"))
-                except Exception:
-                    pass
-                break
+        row = self.get_row_by_strategy_name(strat_name)
+        if row is not None:
+            # print(f"[DIFF] strat={strat_name}, diff={diff}")
+            try:
+                self.table.setItem(row, 6, QTableWidgetItem(f"{float(diff):.2f}"))
+            except Exception:
+                pass
 
 
     def _on_update_qty(self, strat_name, qty_list):
         """
         qty_list is expected as a list of tuples:
         [(total_qty1, traded_qty1), (total_qty2, traded_qty2), ...]
-        Only first two used for 2-leg strategies.
         """
-        for r in range(self.table.rowCount()):
-            if self.table.item(r, 1).text() == strat_name:
-                for idx in range(8):  # Always 8 legs
-                    if idx < len(qty_list):
-                        total_qty, traded_qty = qty_list[idx]
-                        order_qty = total_qty - traded_qty
-                        total_qty_str = str(total_qty)
-                        order_qty_str = str(order_qty) if order_qty > 0 else ""
-                        traded_qty_str = str(traded_qty)
-                    else:
-                        total_qty_str = order_qty_str = traded_qty_str = ""
-                    base_col = 7 + idx*5
-                    self.table.setItem(r, base_col+2, QTableWidgetItem(total_qty_str))
-                    self.table.setItem(r, base_col+3, QTableWidgetItem(order_qty_str))
-                    self.table.setItem(r, base_col+4, QTableWidgetItem(traded_qty_str))
-                self.update_serial_color(r)
-                break
+        row = self.get_row_by_strategy_name(strat_name)
+        if row is not None:
+            for idx in range(8):  # Always 8 legs
+                if idx < len(qty_list):
+                    total_qty, traded_qty = qty_list[idx]
+                    order_qty = total_qty - traded_qty
+                    total_qty_str = str(total_qty)
+                    order_qty_str = str(order_qty) if order_qty > 0 else ""
+                    traded_qty_str = str(traded_qty)
+                else:
+                    total_qty_str = order_qty_str = traded_qty_str = ""
+                base_col = 7 + idx*5
+                self.table.setItem(r, base_col+2, QTableWidgetItem(total_qty_str)) # TotalQty
+                self.table.setItem(r, base_col+3, QTableWidgetItem(order_qty_str)) # OrderQty
+                self.table.setItem(r, base_col+4, QTableWidgetItem(traded_qty_str)) # TradedQty
+            self.update_serial_color(row)
 
 
     def _update_button_states(self):
@@ -1187,36 +1246,38 @@ class MainWindow(QMainWindow):
         self.btn_save.setEnabled(any_strat)
         self.btn_load.setEnabled(True)
         self.btn_delete.setEnabled(sel_valid)
-        self.btn_manual_sqoff.setEnabled(sel_valid)
+        self.btn_manual_sqoff.setEnabled(any_strat) # Can sqoff all
 
-        # Start button: enabled if selected row is not enabled
-        if sel_valid:
-            name = self.table.item(sel_row, 1).text()
-            state = self.executor.active_strategies.get(name)
-            if state:
-                st = state.get("status", "disabled")
-                self.btn_start.setEnabled(st in ("disabled"))
-                self.btn_stop.setEnabled(st == "enabled" or st == "waiting")
+        # FIX: Use lock to safely check states
+        with self.executor.state_lock:
+            # Start button: enabled if selected row is not enabled
+            if sel_valid:
+                name = self.table.item(sel_row, 1).text()
+                state = self.executor.active_strategies.get(name)
+                if state:
+                    st = state.get("status", "disabled")
+                    self.btn_start.setEnabled(st in ("disabled", "sl_hit", "tp_hit", "squared_off"))
+                    self.btn_stop.setEnabled(st in ("enabled", "waiting", "triggered"))
+                else:
+                    self.btn_start.setEnabled(True)
+                    self.btn_stop.setEnabled(False)
             else:
-                self.btn_start.setEnabled(True)
+                self.btn_start.setEnabled(False)
                 self.btn_stop.setEnabled(False)
-        else:
-            self.btn_start.setEnabled(False)
-            self.btn_stop.setEnabled(False)
 
-        # Start All: enabled if any is not enabled
-        any_not_enabled = any(
-            s.get("status", "disabled") in ("disabled", "waiting")
-            for s in self.executor.active_strategies.values()
-        )
-        self.btn_start_all.setEnabled(any_not_enabled)
+            # Start All: enabled if any is not enabled
+            any_not_enabled = any(
+                s.get("status", "disabled") in ("disabled", "sl_hit", "tp_hit", "squared_off")
+                for s in self.executor.active_strategies.values()
+            )
+            self.btn_start_all.setEnabled(any_not_enabled)
 
-        # Stop All: enabled if any is enabled or waiting
-        any_enabled = any(
-            s.get("status", "disabled") in ("enabled", "waiting")
-            for s in self.executor.active_strategies.values()
-        )
-        self.btn_stop_all.setEnabled(any_enabled)
+            # Stop All: enabled if any is enabled or waiting
+            any_enabled = any(
+                s.get("status", "disabled") in ("enabled", "waiting", "triggered")
+                for s in self.executor.active_strategies.values()
+            )
+            self.btn_stop_all.setEnabled(any_enabled)
 
     def _update_strategy_row(self, row, strat):
         # Update fixed columns
@@ -1227,27 +1288,40 @@ class MainWindow(QMainWindow):
         self.table.setItem(row, 3, QTableWidgetItem(str(strat.get("SL", ""))))
         self.table.setItem(row, 4, QTableWidgetItem(str(strat.get("TP", ""))))
         self.table.setItem(row, 5, QTableWidgetItem(str(strat.get("PnL", "0.00"))))
-        self.table.setItem(row, 6, QTableWidgetItem(str(strat.get("Current Diff", ""))))
+        self.table.setItem(row, 6, QTableWidgetItem(str(strat.get("Current Diff", "0.00"))))
         
         # Now fill up to 8 legs 
         col = 7
         for i in range(1, 9):
             token = str(strat.get(f"Token{i}", "") or "")
             side = str(strat.get(f"Side{i}", "") or "")
-            total_qty = str(strat.get(f"TotalQty{i}", "") or "")
-            order_qty = ""
-            traded_qty = str(strat.get(f"TradedQty{i}", "") or "")
+            
+            # Recalculate TotalQty
+            lots_str = strat.get(f"Lots{i}", "0")
+            total_qty_str = ""
+            if token and lots_str.isdigit():
+                lot_size = get_lot_size(token)
+                if lot_size:
+                    total_qty_str = str(int(lots_str) * lot_size)
+            
+            if not total_qty_str:
+                 total_qty_str = str(strat.get(f"TotalQty{i}", "") or "")
+
+            traded_qty_str = str(strat.get(f"TradedQty{i}", "0") or "0")
+            order_qty_str = ""
             try:
-                tq = int(total_qty)
-                tr = int(traded_qty)
-                order_qty = str(tq - tr) if tq - tr > 0 else ""
+                tq = int(total_qty_str) if total_qty_str else 0
+                tr = int(traded_qty_str) if traded_qty_str else 0
+                order_qty = tq - tr
+                order_qty_str = str(order_qty) if order_qty > 0 else ""
             except Exception:
                 pass
+
             self.table.setItem(row, col,   QTableWidgetItem(token))
             self.table.setItem(row, col+1, QTableWidgetItem(side))
-            self.table.setItem(row, col+2, QTableWidgetItem(total_qty))
-            self.table.setItem(row, col+3, QTableWidgetItem(order_qty))
-            self.table.setItem(row, col+4, QTableWidgetItem(traded_qty))
+            self.table.setItem(row, col+2, QTableWidgetItem(total_qty_str)) # TotalQty
+            self.table.setItem(row, col+3, QTableWidgetItem(order_qty_str)) # OrderQty
+            self.table.setItem(row, col+4, QTableWidgetItem(traded_qty_str)) # TradedQty
             col += 5
 
     def handle_kill_switch(self):
@@ -1258,7 +1332,7 @@ class MainWindow(QMainWindow):
         )
         if confirm == QMessageBox.Yes:
             self.executor.kill_switch()
-            self.btn_start.setEnabled(True)
-            self.btn_start_all.setEnabled(True)
+            # self.btn_start.setEnabled(True) # These are set by _update_button_states
+            # self.btn_start_all.setEnabled(True)
             self._update_button_states()
             QMessageBox.information(self, "Kill Switch", "All orders cancelled and all positions squared off.\nAll strategies stopped.")

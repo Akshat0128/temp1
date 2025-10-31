@@ -12,7 +12,16 @@ def get_simplest_lot_ratio(qty_list):
     return [q // factor for q in lot_sizes]
 
 def calculate_per_ratio_diff(legs, prices, lot_sizes):
+    """
+    Calculates the net difference based on the formula:
+    (Total Buy Value - Total Sell Value) / Total Buy Quantity
+    
+    - legs: List of dicts, e.g., [{'side': 'BUY', 'lots': 1}, ...]
+    - prices: List of floats (LTPs) for each leg.
+    - lot_sizes: List of ints (lot size) for each leg.
+    """
     if len(legs) != len(prices) or len(legs) != len(lot_sizes):
+        # Ensure all lists are aligned
         return 0.0 
 
     total_buy_value = 0.0
@@ -24,6 +33,7 @@ def calculate_per_ratio_diff(legs, prices, lot_sizes):
         lot_size = lot_sizes[i]
         lots = int(leg.get('lots', 0))
         
+        # Skip calculation for this leg if data is bad
         if price is None or price <= 0 or lot_size is None or lot_size <= 0 or lots <= 0:
             continue 
 
@@ -40,4 +50,5 @@ def calculate_per_ratio_diff(legs, prices, lot_sizes):
         net = (total_buy_value - total_sell_value) / total_buy_quantity
         return net
     
+    # Avoid division by zero if there are no BUY legs
     return 0.0
